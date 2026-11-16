@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>双Excel极速精准对账</title>
+    <!-- 引入表格解析库 -->
+    <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+    <style>
+        body { font-family: -apple-system, sans-serif; background: #f5f5f5; padding: 15px; margin: 0; color:#333; }
+        h2 { text-align: center; font-size: 20px; }
+        .box { background: white; padding: 15px; border-radius: 10px; margin-bottom: 15px; box-shadow: 0 2px 5px rgba(0,0,0,0.05); }
+        .file-input { display: block; margin: 10px 0; padding: 15px; border: 2px dashed #07c160; border-radius: 10px; width: 100%; box-sizing: border-box; background: #f0fdf4; text-align: center; font-weight: bold; color: #07c160; cursor: pointer;}
+        button { width: 100%; padding: 15px; background: #07c160; color: white; border: none; border-radius: 5px; font-size: 18px; font-weight: bold; cursor: pointer; margin-top: 10px;}
+        
+        .result-box { background: white; padding: 15px; border-radius: 10px; margin-top: 15px; display: none; }
+        .bad-card { background: #fff2f0; border: 1px solid #ffccc7; border-radius: 8px; padding: 12px; margin-bottom: 10px; }
+        .bad-card .id { font-size: 22px; font-weight: bold; color: #ff3b30; border-bottom: 1px dashed #ffccc7; padding-bottom: 5px; margin-bottom: 5px; }
+        .bad-card .info { font-size: 15px; color: #333; display: flex; justify-content: space-between; margin-top: 5px;}
+        .bad-card .info span { font-weight: bold; }
+        .success { font-size: 20px; color: #07c160; font-weight: bold; padding: 20px; text-align: center;}
+        .status-txt { font-size: 13px; color: #07c160; margin-top:5px; font-weight: bold;}
+    </style>
+</head>
+<body>
+
+    <h2>⚡ 双表极速对账</h2>
+
+    <div class="box">
+        <h3>1. 导入平台订单表 (.xlsx)</h3>
+        <input type="file" id="orderFile" class="file-input" accept=".xlsx, .xls, .csv">
+        <div id="orderStatus" class="status-txt"></div>
+    </div>
+
+    <div class="box">
+        <h3>2. 导入微信支付账单 (.xlsx)</h3>
+        <input type="file" id="payFile" class="file-input" accept=".xlsx, .xls, .csv">
+        <div id="payStatus" class="status-txt"></div>
+    </div>
+
+    <button onclick="startCheck()">🔍 开始一键核对</button>
+
+    <div id="resultBox" class="result-box">
+        <h3 style="color: #ff3b30; border-bottom: 2px solid #eee; padding-bottom: 5px;">❌ 以下订单未查到收款记录：</h3>
+        <div id="badList"></div>
+    </div>
+
+<script>
+    let orderData = []; 
+    let payAmounts = [];
+
+    // === 1. 读取平台订单表 ===
+    document.getElementById('orderFile').addEventListener('change', (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+        
+        const reader = new FileReader();
+        reader.onload = function(e) {
+            const data = new Uint8Array(e.target.result);
+            const workbook = XLSX.read(data, {type: 'array'});
+            const worksheet = workbook.Sheets[workbook.SheetNames[0]];
+            const jsonData = XLSX.utils.sheet_to_json(worksheet, {header: 1, defval: ""}); 
+            
+            orderData = [];
+            
+            for (let i = 1; i < jsonData.length; i++) {
+                let row = jsonData[i];
+                if (!row || row.length < 12) continue;
+
+                let address = row[3] ? row[3].toString() : ''; 
+                let shortId = row[5] ? row[5].toString().trim() : ''; 
+                let payInfo = row[10] ? row[10].toString() : ''; 
+                let time = row[13] ? row[13].toString() : ''; 
+
+                // 只要包含“货到付款”的单子
+                if (!payInfo.includes('货到付款')) continue;
+                // 只要3位数单号
+                if (!/^\d{3}$/.test(shortId)) continue;
+
+                const amountMatch = payInfo.match(/货到付款\s*:\s*(\d+(\.\d{1,2})?)/);
+                if (!amountMatch) continue;
+                let amount = parseFloat(amountMatch[1]).toFixed(2);
+
+                const roomMatch = address.match(/\d{3,5}$/);
+                let room = roomMatch ? roomMatch[0] : address;
+
+                if (shortId && room && amount) {
+                    orderData.push({ id: shortId, room: room, amount: amount, time: time.replace('2026-', '') });
+                }
+            }
+            document.getElementById('orderStatus').innerText = `✅ 成功读取 ${orderData.length} 条待收款订单。`;
+        };
+        reader.readAsArrayBuffer(file);
+    });
+
+    // === 2. 读取微信支付账单 ===
+    document.getElementById('payFile').addEventListener('change', (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+        
+        const reader = new FileReader();
+        reader.onload = function(e) {
+            const data = new Uint8Array(e.target.result);
+            const workbook = XLSX.read(data, {type: 'array'});
+            const worksheet = workbook.Sheets[workbook.SheetNames[0]];
+            const jsonData = XLSX.utils.sheet_to_json(worksheet, {header: 1, defval: ""}); 
+            
+            payAmounts = [];
+            
+            // 微信账单的表头在中间，我们直接全局扫描，找包含“收入”的行，提取金额
+            jsonData.forEach(row => {
+                if (!row) return;
+                // 寻找“收入”这两个字
+                let rowStr = row.join(",");
+                if (rowStr.includes("收入") && row.length > 5) {
+                    // F列是金额，索引为 5
+                    let amountStr = row[5] ? row[5].toString() : '';
+                    let amount = parseFloat(amountStr);
+                    if (!isNaN(amount)) {
+                        payAmounts.push(amount.toFixed(2));
+                    }
+                }
+            });
+            
+            document.getElementById('payStatus').innerText = `✅ 成功读取微信收款 ${payAmounts.length} 笔，总计 ¥${payAmounts.reduce((a,b)=>parseFloat(a)+parseFloat(b), 0).toFixed(2)}。`;
+        };
+        reader.readAsArrayBuffer(file);
+    });
+
+    // === 3. 核对逻辑 ===
+    function startCheck() {
+        if (orderData.length === 0) { alert("请先上传平台订单表！"); return; }
+        if (payAmounts.length === 0) { alert("请先上传微信账单表！"); return; }
+        
+        let tempPays = [...payAmounts];
+        let mismatchedOrders = [];
+
+        // 按照金额一对一抵消
+        orderData.forEach(order => {
+            let payIndex = tempPays.indexOf(order.amount);
+            if (payIndex !== -1) {
+                tempPays.splice(payIndex, 1); 
+            } else {
+                mismatchedOrders.push(order); 
+            }
+        });
+
+        const resultBox = document.getElementById('resultBox');
+        const badList = document.getElementById('badList');
+        resultBox.style.display = 'block';
+        badList.innerHTML = '';
+
+        if (mismatchedOrders.length === 0) {
+            badList.innerHTML = '<div class="success">🎉 账目全平，所有货到付款都收到钱了！</div>';
+        } else {
+            mismatchedOrders.forEach(order => {
+                badList.innerHTML += `
+                    <div class="bad-card">
+                        <div class="id">订单号：${order.id}</div>
+                        <div class="info"><span>寝室号：</span> ${order.room}</div>
+                        <div class="info"><span>未收金额：</span> <span style="color:#ff3b30">¥${order.amount}</span></div>
+                        <div class="info"><span>时间：</span> ${order.time}</div>
+                    </div>
+                `;
+            });
+        }
+    }
+</script>
+</body>
+</html>
